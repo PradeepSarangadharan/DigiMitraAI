@@ -7,15 +7,18 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import ConversationalRetrievalChain
 import os
 from pathlib import Path
-import fitz
+import json
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-from utils.domain_checker import DomainChecker
 
 class RAGAgent:
-    def __init__(self, model_name: str = "gpt-3.5-turbo", vector_store_path: str = "data/vector_store"):
+    def __init__(self, 
+                 model_name: str = "gpt-3.5-turbo", 
+                 vector_store_path: str = "data/vector_store",
+                 json_path: str = "data/faqs/consolidated_faqs.json"):
         self.model_name = model_name
         self.vector_store_path = vector_store_path
+        self.json_path = json_path
         self.embeddings = OpenAIEmbeddings()
         self.llm = ChatOpenAI(model_name=model_name, temperature=0.7)
         
@@ -25,19 +28,18 @@ class RAGAgent:
             output_key="answer"
         )
         
+        # Enhanced text splitter for JSON content
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
             length_function=len,
+            separators=["\n\n", "\n", " ", ""]
         )
         
-        self.domain_checker = DomainChecker()
-        
-        self.qa_template = """You are an expert Aadhaar customer service assistant. You can ONLY answer questions related to Aadhaar and its services.
-        If the question is not related to Aadhaar, politely inform that you can only assist with Aadhaar-related queries.
-        Use the following context to answer the question at the end.
-        If you don't know the answer based on the context, just say "I don't have enough information to answer that question accurately."
-        
+        self.qa_template = """You are an expert Aadhaar customer service assistant. Use the following pieces of context to answer the question at the end.
+        If you don't know the answer based on the context, just say "I don't have enough information to answer that question accurately using the Knowledgebase, hence will utilize LLM to answer your query"
+        Try to be as helpful as possible while staying true to the context provided.
+
         Context: {context}
 
         Question: {question}
@@ -51,32 +53,32 @@ class RAGAgent:
         
         self.vector_store = None
         self.qa_chain = None
+        self.faq_data = None
         
         self._load_vector_store()
 
-    def process_pdf(self, pdf_path: str) -> List[Dict]:
-        """Process PDF document and return chunks with metadata"""
-        doc = fitz.open(pdf_path)
-        chunks = []
-        
-        for page_num in range(doc.page_count):
-            page = doc[page_num]
-            text = page.get_text()
-            
-            # Split text into chunks
-            texts = self.text_splitter.split_text(text)
-            
-            # Create chunks with metadata
-            for chunk in texts:
-                chunks.append({
-                    "content": chunk,
-                    "metadata": {
-                        "source": pdf_path,
-                        "page": page_num + 1
-                    }
-                })
-        
-        return chunks
+    def _load_json_faqs(self) -> List[Dict]:
+        """Load FAQs from JSON file"""
+        try:
+            if os.path.exists(self.json_path):
+                with open(self.json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return data.get('faqs', [])
+            return []
+        except Exception as e:
+            print(f"Error loading JSON FAQs: {str(e)}")
+            return []
+
+    def _prepare_documents(self, faqs: List[Dict]) -> List[str]:
+        """Prepare FAQ documents for vectorization"""
+        documents = []
+        for faq in faqs:
+            # Create a combined text with metadata
+            doc_text = f"""Question: {faq['question']}\nAnswer: {faq['answer']}"""
+            if 'metadata' in faq:
+                doc_text += f"\nMetadata: {json.dumps(faq['metadata'])}"
+            documents.append(doc_text)
+        return documents
 
     def _load_vector_store(self):
         """Load or create vector store from JSON FAQs"""
@@ -116,61 +118,51 @@ class RAGAgent:
             print(f"Error initializing QA chain: {str(e)}")
             self.qa_chain = None
 
-    def initialize_vector_store(self, pdf_paths: List[str]) -> None:
-        """Initialize FAISS vector store from PDF documents"""
-        all_chunks = []
-        for pdf_path in pdf_paths:
-            chunks = self.process_pdf(pdf_path)
-            all_chunks.extend(chunks)
-        
-        texts = [chunk["content"] for chunk in all_chunks]
-        metadatas = [chunk["metadata"] for chunk in all_chunks]
-        
-        self.vector_store = FAISS.from_texts(
-            texts, 
-            self.embeddings,
-            metadatas=metadatas
-        )
-        
-        os.makedirs(self.vector_store_path, exist_ok=True)
-        self.vector_store.save_local(self.vector_store_path)
-        
-        self._initialize_qa_chain()
-
-    def update_vector_store(self, new_pdf_paths: List[str]) -> None:
-        """Add new PDF documents to existing vector store"""
-        new_chunks = []
-        for pdf_path in new_pdf_paths:
-            chunks = self.process_pdf(pdf_path)
-            new_chunks.extend(chunks)
-        
-        texts = [chunk["content"] for chunk in new_chunks]
-        metadatas = [chunk["metadata"] for chunk in new_chunks]
-        
-        if self.vector_store is None:
-            self._load_vector_store()
-        
-        if self.vector_store:
-            self.vector_store.add_texts(texts, metadatas=metadatas)
-            self.vector_store.save_local(self.vector_store_path)
-        else:
-            self.vector_store = FAISS.from_texts(texts, self.embeddings, metadatas=metadatas)
-            self.vector_store.save_local(self.vector_store_path)
-        
-        self._initialize_qa_chain()    
-
-    def _load_vector_store(self):
+    def initialize_vector_store(self) -> None:
+        """Initialize the FAISS vector store from JSON FAQs"""
         try:
-            if os.path.exists(self.vector_store_path):
-                self.vector_store = FAISS.load_local(
-                    self.vector_store_path, 
-                    self.embeddings,
-                    allow_dangerous_deserialization=True
-                )
-                self._initialize_qa_chain()
+            print("Starting vector store initialization from JSON...")
+            
+            # Load FAQs from JSON
+            faqs = self._load_json_faqs()
+            if not faqs:
+                raise ValueError("No FAQs found in JSON file")
+            
+            # Prepare documents
+            documents = self._prepare_documents(faqs)
+            
+            # Split documents into chunks
+            texts = self.text_splitter.create_documents(documents)
+            
+            # Create vector store
+            self.vector_store = FAISS.from_documents(texts, self.embeddings)
+            
+            # Save vector store
+            os.makedirs(self.vector_store_path, exist_ok=True)
+            self.vector_store.save_local(self.vector_store_path)
+            
+            # Initialize QA chain
+            self._initialize_qa_chain()
+            
+            print("Vector store initialized successfully from JSON")
         except Exception as e:
-            print(f"Error loading vector store: {str(e)}")
-            self.vector_store = None    
+            print(f"Error initializing vector store: {str(e)}")
+            raise
+
+    def _find_exact_faq_match(self, query: str) -> Dict:
+        """Find exact or close match in FAQ data"""
+        faqs = self._load_json_faqs()
+        query_lower = query.lower().strip('?., ')
+        
+        for faq in faqs:
+            question = faq['question'].lower().strip('?., ')
+            if query_lower == question:
+                return {'match': faq, 'confidence': 1.0}
+            elif query_lower in question or question in query_lower:
+                return {'match': faq, 'confidence': 0.9}
+        
+        return {'match': None, 'confidence': 0.0}
+
 
     def _is_domain_relevant(self, query: str) -> bool:
         """Check if query is relevant to Aadhaar domain"""
@@ -299,50 +291,31 @@ class RAGAgent:
             }
 
     def process_query(self, query: str) -> Dict:
+        """Process a query and return response with sources"""
         try:
-            is_relevant, relevance_score = self.domain_checker.is_domain_relevant(query)
-            
-            if not is_relevant:
-                return {
-                    "answer": "I apologize, but I can only assist with questions related to Aadhaar and its services. Your question appears to be about something else. Please feel free to ask any Aadhaar-related questions.",
-                    "confidence": 1.0,
-                    "sources": []
-                }
-
             if not self.qa_chain:
                 self._load_vector_store()
                 if not self.qa_chain:
-                    raise ValueError("QA chain not initialized.")
+                    raise ValueError("QA chain not initialized. Vector store may be empty.")
             
-            print(f"\nRAG Processing:")
-            print(f"Query: {query}")
-
-
             # Get response from QA chain
             result = self.qa_chain({
                 "question": query,
                 "chat_history": []
             })
-        
+            
+            # Get source documents
             source_docs = result.get("source_documents", [])
+            
+            # Calculate confidence with detailed context
             confidence_info = self._calculate_confidence(query, source_docs)
             
-            # Format sources
-            sources = []
-            for doc in source_docs:
-                if hasattr(doc, 'metadata'):
-                    sources.append(f"Source: {doc.metadata.get('source', 'Unknown')}, "
-                                f"Page: {doc.metadata.get('page', 'Unknown')}")
+            print(f"\nQuery: {query}")
+            print(f"Confidence Info: {confidence_info}")
             
-            print(f"Confidence Score: {confidence_info}")
-            print("Relevant Chunks:")
-            for doc in source_docs:
-                print(f"- Source: {doc.metadata.get('source')}, Page: {doc.metadata.get('page')}")
-                print(f"  Content: {doc.page_content[:200]}...")
-
             return {
                 "answer": result["answer"],
-                "sources": [f"Source: {doc.metadata.get('source')}, Page: {doc.metadata.get('page')}" for doc in source_docs],
+                "sources": [doc.page_content for doc in source_docs],
                 "confidence": confidence_info["confidence"],
                 "domain_relevant": confidence_info["domain_relevant"],
                 "has_sources": confidence_info["has_sources"],
@@ -350,31 +323,10 @@ class RAGAgent:
                 "semantic_match": confidence_info["semantic_match"],
                 "debug_info": confidence_info.get("debug_info", {})
             }
-         
+            
         except Exception as e:
             print(f"Error processing query: {str(e)}")
             raise
-    
-    def _find_exact_faq_match(self, query: str) -> Dict:
-        """Find exact match in vector store"""
-        try:
-            if not self.vector_store:
-                return {"confidence": 0.0, "match": None}
-
-            results = self.vector_store.similarity_search_with_score(query, k=1)
-            if results:
-                doc, score = results[0]
-                exact_match_threshold = 0.95
-                if score >= exact_match_threshold:
-                    return {"confidence": 1.0, "match": doc}
-                elif score >= 0.8:
-                    return {"confidence": 0.9, "match": doc}
-            
-            return {"confidence": 0.0, "match": None}
-            
-        except Exception as e:
-            print(f"Error in exact match: {str(e)}")
-            return {"confidence": 0.0, "match": None}
 
     def clear_memory(self):
         """Clear conversation memory"""

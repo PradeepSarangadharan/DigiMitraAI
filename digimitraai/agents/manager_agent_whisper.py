@@ -29,6 +29,14 @@ class ManagerAgent:
         # Set confidence thresholds
         self.rag_confidence_threshold = rag_confidence_threshold
         self.audio_confidence_threshold = audio_confidence_threshold
+
+            # Update process_multilingual_query method to use google_audio_agent for audio:
+        if audio_file:
+            audio_result = self.google_audio_agent.process_audio_query(
+                audio_file,
+                source_language,
+                target_language
+            )
         
         print("All agents initialized successfully")
 
@@ -52,11 +60,11 @@ class ManagerAgent:
             print(f"Error loading environment variables: {str(e)}")
             raise
 
-    def process_query(self, query: str, audio_data: Optional = None) -> Dict:
+    def process_query(self, query: str, audio_file: Optional = None) -> Dict:
         """Process a query using the appropriate agent(s)"""
         try:
-            if audio_data:
-                audio_result = self._process_audio_input(audio_data)
+            if audio_file:
+                audio_result = self._process_audio_input(audio_file)
                 if not audio_result["success"]:
                     return audio_result
                 query = audio_result["text"]
@@ -131,10 +139,10 @@ class ManagerAgent:
                 "text": query if query else "Audio processing failed"
             }
 
-    def _process_audio_input(self, audio_data) -> Dict:
+    def _process_audio_input(self, audio_file) -> Dict:
         """Process audio input and handle errors"""
         try:
-            audio_result = self.audio_agent.process_audio(audio_data)
+            audio_result = self.audio_agent.process_audio(audio_file)
             
             if not audio_result["success"]:
                 return {
@@ -217,19 +225,22 @@ class ManagerAgent:
 
     def process_multilingual_query(self, 
                                 query: Optional[str] = None,
-                                audio_data: Optional[tuple] = None,
+                                audio_file: Optional = None,
                                 source_language: str = 'english',
                                 target_language: str = 'english') -> Dict:
+        """Process query in specified language"""
         try:
             print("\nProcessing Query:")
             print(f"Source Language: {source_language}")
             print(f"Target Language: {target_language}")
+            if not hasattr(self, 'multilingual_agent'):
+                self.multilingual_agent = MultilingualAgent()
 
             # Process audio if provided
-            if audio_data:
+            if audio_file:
                 print(f"\nProcessing audio in {source_language}...")
-                audio_result = self.google_audio_agent.process_audio_query(
-                    audio_data,
+                audio_result = self.multilingual_agent.process_audio_query(
+                    audio_file,
                     source_language
                 )
                 
@@ -239,14 +250,16 @@ class ManagerAgent:
                         "success": False
                     }
                 
-                original_query = audio_result["text"]
-                query = audio_result["original_text"]
+                # Use English translation for processing
+                original_query = audio_result["text"]  # Original language text
+                query = audio_result["original_text"]  # English translation
                 print(f"Original language text: {original_query}")
                 print(f"English query: {query}")
             else:
                 # Handle text input
                 original_query = query
                 if source_language != 'english':
+                    # Translate to English for processing
                     translation = self.multilingual_agent.translate_text(
                         query, 
                         source_language, 
@@ -256,18 +269,25 @@ class ManagerAgent:
                         return translation
                     query = translation["text"]
                     print(f"Translated query to English: {query}")
+                else:
+                    query = original_query
 
-            # Process query in English
+            # Process query in English using RAG/LLM
             print(f"\nProcessing English query: {query}")
             try:
+                # Try RAG first
                 rag_response = self.rag_agent.process_query(query)
+                
                 if rag_response["confidence"] >= self.rag_confidence_threshold:
                     response = rag_response
                 else:
-                    response = self.llm_agent.process_query(query)
+                    # Use LLM if RAG confidence is low
+                    llm_response = self.llm_agent.process_query(query)
+                    response = llm_response
+                    
             except Exception as e:
                 print(f"Error in query processing: {str(e)}")
-                response = self.llm_agent.process_query(query)
+                response = self.llm_agent.process_query(query)  # Fallback to LLM
 
             # Translate response if needed
             if target_language != 'english':
@@ -279,13 +299,6 @@ class ManagerAgent:
                 if translation["success"]:
                     response["original_answer"] = response["answer"]
                     response["answer"] = translation["text"]
-
-            response.update({
-                "original_query": original_query,
-                "english_query": query,
-                "source_language": source_language,
-                "target_language": target_language
-            })
 
             return response
 

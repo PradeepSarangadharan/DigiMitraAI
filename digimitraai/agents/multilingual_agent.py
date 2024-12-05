@@ -16,15 +16,15 @@ class MultilingualAgent:
         gc.collect()
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
-        print("Loading Whisper model...")
+        # print("Loading Whisper model...")
         try:
             # Set environment variables for memory optimization
-            os.environ['OMP_NUM_THREADS'] = '1'
-            os.environ['MKL_NUM_THREADS'] = '1'
+            # os.environ['OMP_NUM_THREADS'] = '1'
+            # os.environ['MKL_NUM_THREADS'] = '1'
             
             # Configure PyTorch for memory efficiency
-            torch.set_num_threads(1)
-            torch.set_num_interop_threads(1)
+            # torch.set_num_threads(1)
+            # torch.set_num_interop_threads(1)
             
             # Use medium model for better accuracy with longer sentences
             self.whisper_model = whisper.load_model(

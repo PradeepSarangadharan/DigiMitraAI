@@ -56,7 +56,7 @@ class AadhaarChatInterface:
                         
                         # Process audio with temporary file
                         response = self.manager_agent.process_multilingual_query(
-                            audio_data=temp_path,
+                            audio_file=temp_path,
                             source_language=source_language,
                             target_language=target_language
                         )
@@ -66,7 +66,7 @@ class AadhaarChatInterface:
                             os.unlink(temp_path)
                 else:
                     response = self.manager_agent.process_multilingual_query(
-                        audio_data=audio_data,
+                        audio_file=audio_data,
                         source_language=source_language,
                         target_language=target_language
                     )
@@ -123,48 +123,7 @@ class AadhaarChatInterface:
             return self.process_query(None, audio_input, source_lang, target_lang, history)
         return history
     
-    def process_with_audio(self, message, audio_path, src_lang, tgt_lang, history, enable_voice):
-        try:
-            # Process query
-            if audio_path:
-                response = self.manager_agent.process_multilingual_query(
-                    audio_data=audio_path,
-                    source_language=src_lang,
-                    target_language=tgt_lang
-                )
-                query = response.get("original_text", "")
-            else:
-                response = self.manager_agent.process_multilingual_query(
-                    query=message,
-                    source_language=src_lang,
-                    target_language=tgt_lang
-                )
-                query = message
-
-            # Update chat history
-            history.append((query, response["answer"]))
-
-            # Generate audio if enabled
-            audio_path = None
-            if enable_voice:
-                audio_result = self.manager_agent.google_audio_agent.text_to_speech(
-                    response["answer"],
-                    tgt_lang
-                )
-                if audio_result["success"]:
-                    audio_path = audio_result["audio_path"]
-
-            return history, audio_path
-            
-        except Exception as e:
-            print(f"Error: {str(e)}")
-            history.append((message or "Audio Input", f"Error: {str(e)}"))
-            return history, None
-
     def create_interface(self):
-        def clear_fn():
-            return [], None
-
         with gr.Blocks(title="Aadhaar Customer Service Assistant") as interface:
             gr.Markdown("# Aadhaar Customer Service Assistant")
             
@@ -180,8 +139,10 @@ class AadhaarChatInterface:
                     label="Output Language"
                 )
 
-            chatbot = gr.Chatbot([], height=400)
-            audio_output = gr.Audio(label="Response Audio", visible=False)
+            chatbot = gr.Chatbot(
+                [],
+                height=400
+            )
 
             with gr.Row():
                 txt = gr.Textbox(
@@ -191,65 +152,118 @@ class AadhaarChatInterface:
                 )
 
             with gr.Row():
+                # Audio recording component
                 mic_audio = gr.Audio(
                     sources=["microphone"],
                     type="filepath",
                     label="Record Audio"
                 )
+
+                # Audio upload component (changed from File to Audio)
                 upload_audio = gr.Audio(
                     sources=["upload"],
                     type="filepath",
                     label="Upload Audio File"
                 )
 
-            enable_audio = gr.Checkbox(label="Enable Voice Response", value=False)
-            clear = gr.Button("Clear")
+            def clear_chat():
+                return []
 
-            # Create dummy components for None inputs
-            dummy_text = gr.Textbox(visible=False)
-            dummy_audio = gr.Audio(visible=False)
+            def process_text(message, source_lang, target_lang, history):
+                try:
+                    if message:
+                        response = self.manager_agent.process_multilingual_query(
+                            query=message,
+                            source_language=source_lang,
+                            target_language=target_lang
+                        )
+                        history = history or []
+                        history.append((message, response["answer"]))
+                        return history, ""
+                except Exception as e:
+                    history = history or []
+                    history.append((message, f"Error: {str(e)}"))
+                    return history, ""
 
-            # Event handlers with proper component references
+            def process_audio(audio_path, source_lang, target_lang, history):
+                try:
+                    if audio_path:
+                        print("\nProcessing Audio Input:")
+                        response = self.manager_agent.process_multilingual_query(
+                            audio_file=audio_path,
+                            source_language=source_lang,
+                            target_language=target_lang
+                        )
+                        
+                        # Get transcribed question
+                        question = response.get("original_text") or response.get("text", "Audio Query")
+                        answer = response.get("answer", "")
+                        
+                        # Debug output to terminal
+                        print(f"Transcribed Question: {question}")
+                        print(f"Confidence: {response.get('confidence', 0)}")
+                        if 'sources' in response:
+                            print("Sources:", response['sources'])
+                        
+                        # Add question and answer to chat history
+                        if question and answer:
+                            history.append((question, ""))  # Show question
+                            history.append(("", answer))    # Show answer
+                        
+                        return history
+                        
+                    return history
+                        
+                except Exception as e:
+                    print(f"Error processing audio: {str(e)}")
+                    return history
+
+            # Text input handling
             txt.submit(
-                self.process_with_audio,
-                inputs=[txt, dummy_audio, source_language, target_language, chatbot, enable_audio],
-                outputs=[chatbot, audio_output]
+                fn=process_text,
+                inputs=[
+                    txt,
+                    source_language,
+                    target_language,
+                    chatbot
+                ],
+                outputs=[chatbot, txt]
             )
 
+            # Audio recording handling
             mic_audio.stop_recording(
-                self.process_with_audio,
-                inputs=[dummy_text, mic_audio, source_language, target_language, chatbot, enable_audio],
-                outputs=[chatbot, audio_output]
+                fn=process_audio,
+                inputs=[
+                    mic_audio,
+                    source_language,
+                    target_language,
+                    chatbot
+                ],
+                outputs=[chatbot]
             )
 
-            upload_audio.change(
-                self.process_with_audio,
-                inputs=[dummy_text, upload_audio, source_language, target_language, chatbot, enable_audio],
-                outputs=[chatbot, audio_output]
+            # Audio upload handling
+            upload_audio.change(  # Changed from upload to change
+                fn=process_audio,
+                inputs=[
+                    upload_audio,
+                    source_language,
+                    target_language,
+                    chatbot
+                ],
+                outputs=[chatbot]
             )
 
-            enable_audio.change(
-                lambda x: gr.update(visible=x),
-                inputs=enable_audio,
-                outputs=audio_output
-            )
-
+            # Clear button
+            clear = gr.Button("Clear")
             clear.click(
-                clear_fn,
+                fn=clear_chat,
                 inputs=None,
-                outputs=[chatbot, audio_output]
+                outputs=chatbot
             )
 
-            gr.Markdown("---")
-            gr.Markdown("## Book Appointment For Aadhaar Enrollment / Check Aadhar Status")
-            
-            with gr.Row():
-                gr.Button(
-                    "Book Appointment / Check Aadhaar Status",
-                    link="https://aadharappointmentstub-sfwbp53byxdbpsxhwexvpd.streamlit.app/"
-                )
 
-            return interface
+        return interface
 
 def main():
     chat_app = AadhaarChatInterface()
